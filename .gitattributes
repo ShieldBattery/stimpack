@@ -1,0 +1,25 @@
+# Force unix style line endings for everything
+* text eol=lf
+
+*.ico binary
+*.png binary
+*.jpg binary
+*.ai binary
+*.scm binary
+*.scx binary
+*.msi binary
+*.exe binary
+*.diff binary
+*.dll binary
+*.opus binary
+*.mp4 binary
+*.afdesign binary
+
+# Custom for Visual Studio
+*.sln    merge=union
+*.csproj merge=union
+*.vbproj merge=union
+*.fsproj merge=union
+*.dbproj merge=union
+
+*.bat eol=crlf

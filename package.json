@@ -1,0 +1,30 @@
+{
+  "name": "@shieldbattery/stimpack",
+  "version": "0.1.0",
+  "description": "Rust-based Node.js native module for launching processes and injecting DLLs into them",
+  "main": "index.node",
+  "scripts": {
+    "build": "cargo-cp-artifact -nc index.node -- cargo build --message-format=json-render-diagnostics",
+    "build-debug": "npm run build --",
+    "build-release": "npm run build -- --release",
+    "install": "npm run build-release",
+    "test": "cargo test"
+  },
+  "author": "Travis Collins <travis@tec27.com> (http://tec27.com/)",
+  "license": "MIT",
+  "devDependencies": {
+    "cargo-cp-artifact": "^0.1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ShieldBattery/stimpack.git"
+  },
+  "keywords": [
+    "dll",
+    "injection"
+  ],
+  "bugs": {
+    "url": "https://github.com/ShieldBattery/stimpack/issues"
+  },
+  "homepage": "https://github.com/ShieldBattery/stimpack#readme"
+}

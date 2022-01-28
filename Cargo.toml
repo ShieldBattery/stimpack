@@ -1,0 +1,20 @@
+[package]
+name = "stimpack"
+version = "0.1.0"
+description = "Rust-based Node.js native module for launching processes and injecting DLLs into them"
+authors = ["Travis Collins <travis@tec27.com> (http://tec27.com/)"]
+license = "MIT"
+edition = "2018"
+exclude = ["index.node"]
+
+[lib]
+crate-type = ["cdylib"]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+
+[dependencies.neon]
+version = "0.9"
+default-features = false
+features = ["napi-6"]
