@@ -2,9 +2,9 @@
 name = "stimpack"
 version = "0.1.0"
 description = "Rust-based Node.js native module for launching processes and injecting DLLs into them"
-authors = ["Travis Collins <travis@tec27.com> (http://tec27.com/)"]
+authors = ["Travis Collins <travis@tec27.com> (http://tec27.com/)", "Jon Doron <arilou@gmail.com>", ]
 license = "MIT"
-edition = "2018"
+edition = "2021"
 exclude = ["index.node"]
 
 [lib]
@@ -13,8 +13,18 @@ crate-type = ["cdylib"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+anyhow = "1.0"
+ntapi = "0.3.6"
+memoffset = "0.6.5"
 
 [dependencies.neon]
 version = "0.9"
 default-features = false
 features = ["napi-6"]
+
+[dependencies.winapi]
+version = "0.3.9"
+features = [
+    "processthreadsapi", "memoryapi", "errhandlingapi", "libloaderapi", "sysinfoapi",
+	"handleapi", "winbase", "synchapi"
+]
