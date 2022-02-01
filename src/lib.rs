@@ -331,7 +331,7 @@ impl<'a> MemRegionIter<'a> {
 impl<'a> Iterator for MemRegionIter<'a> {
     type Item = MEMORY_BASIC_INFORMATION;
     fn next(&mut self) -> Option<Self::Item> {
-        while self.curr_address < self.end_address {
+        if self.curr_address < self.end_address {
             let mbi = self.proc.virtual_query(self.curr_address)?;
             self.curr_address = mbi.end_addr();
             return Some(mbi);
@@ -543,11 +543,11 @@ impl Process {
     }
 
     pub fn iter_regions(&self) -> MemRegionIter {
-        MemRegionIter::new(&self)
+        MemRegionIter::new(self)
     }
 
     pub fn iter_free_regions(&self) -> impl Iterator<Item = MEMORY_BASIC_INFORMATION> + '_ {
-        MemRegionIter::new(&self).filter(|m| m.is_free())
+        MemRegionIter::new(self).filter(|m| m.is_free())
     }
 
     fn read_image_header<T: MemRegion>(&self, region: &T) -> Option<Box<dyn PeImage>> {
@@ -605,10 +605,7 @@ impl Process {
                 return None;
             }
 
-            match self.read_image_header(&m) {
-                Some(img) => Some((m, img)),
-                _ => None,
-            }
+            self.read_image_header(&m).map(|img| (m, img))
         })
     }
 }
@@ -776,7 +773,7 @@ fn start_injected(exe_path: &str, dll_path: &str, func_name: &str) -> Result<()>
 }
 
 fn hello(mut cx: FunctionContext) -> JsResult<JsString> {
-    let _ = start_injected("","","");
+    let _ = start_injected("", "", "");
     Ok(cx.string("hello node"))
 }
 
