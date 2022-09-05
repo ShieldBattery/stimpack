@@ -1,11 +1,15 @@
-use anyhow::{Context as AnyhowContext, Result};
-use memoffset::offset_of;
-use ntapi::ntmmapi::{NtCreateSection, NtMapViewOfSection, NtUnmapViewOfSection, ViewUnmap};
+use std::cell::RefCell;
 use std::ffi::OsStr;
+use std::io;
 use std::mem;
 use std::os::windows::ffi::OsStrExt;
 use std::ptr;
-use std::sync::Once;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Once};
+
+use anyhow::{anyhow, Context as AnyhowContext, Result};
+use memoffset::offset_of;
+use ntapi::ntmmapi::{NtCreateSection, NtMapViewOfSection, NtUnmapViewOfSection, ViewUnmap};
 use winapi::shared::minwindef::FALSE;
 use winapi::shared::ntdef::{LARGE_INTEGER, MAXULONG, NT_SUCCESS, OBJECT_ATTRIBUTES};
 use winapi::um::errhandlingapi::GetLastError;
@@ -14,7 +18,8 @@ use winapi::um::memoryapi::{
     ReadProcessMemory, VirtualProtectEx, VirtualQueryEx, WriteProcessMemory,
 };
 use winapi::um::processthreadsapi::{
-    CreateProcessW, GetCurrentProcess, ResumeThread, PROCESS_INFORMATION, STARTUPINFOW,
+    CreateProcessW, GetCurrentProcess, GetExitCodeProcess, ResumeThread, TerminateProcess,
+    PROCESS_INFORMATION, STARTUPINFOW,
 };
 use winapi::um::synchapi::WaitForSingleObject;
 use winapi::um::sysinfoapi::{GetNativeSystemInfo, SYSTEM_INFO};
@@ -28,10 +33,70 @@ use winapi::um::winnt::{
     PAGE_EXECUTE_WRITECOPY, PAGE_READWRITE, PVOID, SECTION_MAP_EXECUTE, SECTION_MAP_READ,
     SECTION_MAP_WRITE, SECTION_QUERY, SEC_COMMIT, SEC_IMAGE,
 };
-mod shellcode;
 use neon::context::Context;
 use neon::prelude::*;
 use shellcode::build_injected_code;
+
+mod shellcode;
+
+macro_rules! log {
+    ($($args:tt)*) => {{
+        LOG_CALLBACK.with(|cb| {
+            let cb = cb.borrow();
+            if let Some(ref cb) = *cb {
+                cb.log(format!($($args)*));
+            }
+        });
+    }};
+}
+
+thread_local!(static LOG_CALLBACK: RefCell<Option<LogCallback>> = RefCell::new(None));
+
+struct LogCallback {
+    channel: Channel,
+    callback: Arc<Option<Root<JsFunction>>>,
+}
+
+impl LogCallback {
+    fn log(&self, msg: String) {
+        let cb = self.callback.clone();
+        let _ = self.channel.try_send(move |mut cx| {
+            if let Some(ref cb) = *cb {
+                let cb = cb.to_inner(&mut cx);
+                cb.call_with(&mut cx)
+                    .arg(cx.string(&msg))
+                    .exec(&mut cx)?;
+            }
+            Ok(())
+        });
+    }
+}
+
+impl Drop for LogCallback {
+    fn drop(&mut self) {
+        // Awkwardly we need to consume Root in order to properly drop it (And properly dropping it
+        // is recommended in neon docs), but some of log callbacks may still be executing and we
+        // can't immediately get unique access to it.
+        // Try to wait for up to 5 seconds before giving up; neon is supposed to be able to clean
+        // leaks itself too, so it should be fine to leak in the end.
+        // And as long as LogCallback is just stored in TLS value, stalling for 5 seconds on thread
+        // end should not matter for anyone..
+        for i in 0..6 {
+            if let Some(cb) = Arc::get_mut(&mut self.callback) {
+                if let Some(inner) = cb.take() {
+                    let _ = self.channel.try_send(|mut cx| {
+                        inner.drop(&mut cx);
+                        Ok(())
+                    });
+                }
+            }
+            if i != 5 {
+                std::thread::sleep(std::time::Duration::from_millis(1000));
+            }
+        }
+    }
+}
+
 
 fn system_info() -> &'static SYSTEM_INFO {
     static INIT: Once = Once::new();
@@ -177,7 +242,7 @@ pub struct DynamicCodeSection {
 impl DynamicCodeSection {
     pub fn new(data: &[u8]) -> Option<Self> {
         if data.len() > MAXULONG as usize {
-            eprintln!("Unsupported section size {}", data.len());
+            log!("Unsupported section size {}", data.len());
             return None;
         }
 
@@ -207,7 +272,7 @@ impl DynamicCodeSection {
                 ptr::null_mut(),
             );
             if !NT_SUCCESS(status) {
-                eprintln!("Failed creating DynamicCodeSection");
+                log!("Failed creating DynamicCodeSection");
                 return None;
             }
 
@@ -228,12 +293,12 @@ impl DynamicCodeSection {
                 PAGE_READWRITE,
             );
             if !NT_SUCCESS(status) {
-                eprintln!("Failed to map DynamicCodeSection");
+                log!("Failed to map DynamicCodeSection");
                 return None;
             }
 
             if view_size < data.len() {
-                eprintln!("Section is too small");
+                log!("Section is too small");
                 return None;
             }
 
@@ -274,6 +339,17 @@ impl Drop for DynamicCodeSection {
 
 pub struct Process {
     h: HANDLE,
+}
+
+struct TerminateOnDrop<'a>(&'a Process);
+
+impl<'a> Drop for TerminateOnDrop<'a> {
+    fn drop(&mut self) {
+        let ok = unsafe { TerminateProcess(self.0.handle(), 0) };
+        if ok == 0 {
+            log!("Failed to terminate process {:p}: {}", self.0, io::Error::last_os_error());
+        }
+    }
 }
 
 pub trait MemRegion {
@@ -341,12 +417,15 @@ impl<'a> Iterator for MemRegionIter<'a> {
     }
 }
 
-impl Process {
-    pub fn new_from_handle(h: HANDLE) -> Self {
-        Self { h }
-    }
+fn winapi_str(input: &str) -> Vec<u16> {
+    OsStr::new(input)
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<u16>>()
+}
 
-    pub fn new_from_path(path: &str) -> Option<(Self, HANDLE)> {
+impl Process {
+    pub fn new_from_path(path: &str, args: &str, current_dir: &str) -> Result<(Self, HANDLE)> {
         unsafe {
             let mut process_info: PROCESS_INFORMATION = mem::zeroed();
             let mut startup_info = STARTUPINFOW {
@@ -354,29 +433,31 @@ impl Process {
                 ..mem::zeroed()
             };
 
+            let win_path = winapi_str(path);
+            // CreateProcessW takes args by mutable pointer for whatever reason
+            let mut win_args = winapi_str(args);
+            let win_dir = winapi_str(current_dir);
+
             let success = CreateProcessW(
-                OsStr::new(path)
-                    .encode_wide()
-                    .chain(Some(0))
-                    .collect::<Vec<u16>>()
-                    .as_ptr(),
-                ptr::null_mut(),
+                win_path.as_ptr(),
+                win_args.as_mut_ptr(),
                 ptr::null_mut(),
                 ptr::null_mut(),
                 FALSE,
                 CREATE_SUSPENDED,
                 ptr::null_mut(),
-                ptr::null_mut(),
+                win_dir.as_ptr(),
                 &mut startup_info,
                 &mut process_info,
             );
 
             if success == FALSE {
-                eprintln!("Failed to create process {:?}", path);
-                return None;
+                return Err(
+                    anyhow!("Failed to create process {}: {}", path, io::Error::last_os_error())
+                );
             }
 
-            Some((
+            Ok((
                 Self {
                     h: process_info.hProcess,
                 },
@@ -392,6 +473,18 @@ impl Process {
     pub fn wait(&self, milliseconds: u32) {
         unsafe {
             WaitForSingleObject(self.h, milliseconds);
+        }
+    }
+
+    pub fn exit_code(&self) -> Result<u32> {
+        unsafe {
+            let mut code = 0;
+            let ok = GetExitCodeProcess(self.h, &mut code);
+            if ok == 0 {
+                Err(io::Error::last_os_error().into())
+            } else {
+                Ok(code)
+            }
         }
     }
 
@@ -420,7 +513,7 @@ impl Process {
                 ptr::null_mut(),
             ) == FALSE
             {
-                eprintln!(
+                log!(
                     "ReadProcessMemory({:x?} Len:{:x?}) failed GLE:{}",
                     addr,
                     length,
@@ -443,7 +536,7 @@ impl Process {
                 ptr::null_mut(),
             ) == FALSE
             {
-                eprintln!(
+                log!(
                     "ReadProcessMemory({:x?} Len:{:x?}) failed GLE:{}",
                     addr,
                     mem::size_of::<T>(),
@@ -597,9 +690,9 @@ impl Process {
         Some(nt_header)
     }
 
-    pub fn iter_images(
-        &self,
-    ) -> impl Iterator<Item = (MEMORY_BASIC_INFORMATION, Box<dyn PeImage + '_>)> {
+    pub fn iter_images<'a>(
+        &'a self,
+    ) -> impl Iterator<Item = (MEMORY_BASIC_INFORMATION, Box<dyn PeImage + 'static>)> + 'a {
         self.iter_regions().filter_map(|m| {
             if !m.is_image() {
                 return None;
@@ -610,6 +703,9 @@ impl Process {
     }
 }
 
+unsafe impl Send for Process {}
+unsafe impl Sync for Process {}
+
 impl Drop for Process {
     fn drop(&mut self) {
         unsafe {
@@ -617,6 +713,12 @@ impl Drop for Process {
                 CloseHandle(self.h);
             }
         }
+    }
+}
+
+impl Finalize for Process {
+    fn finalize<'a, C: Context<'a>>(self, _: &mut C) {
+        // No JS cleanup needed.
     }
 }
 
@@ -641,7 +743,7 @@ fn find_ntdll(proc: &Process, machine: u16) -> Option<usize> {
     })
 }
 
-fn find_exe(proc: &Process) -> Option<(usize, Box<dyn PeImage + '_>)> {
+fn find_exe(proc: &Process) -> Option<(usize, Box<dyn PeImage>)> {
     proc.iter_images().find_map(|(m, img)| {
         if img.is_dll() {
             return None;
@@ -707,10 +809,18 @@ fn write_proc_pointer<T: PeImage + ?Sized>(
     }
 }
 
-fn start_injected(exe_path: &str, dll_path: &str, func_name: &str) -> Result<()> {
+fn start_injected(
+    exe_path: &str,
+    args: &str,
+    current_dir: &str,
+    dll_path: &str,
+    func_name: &str,
+) -> Result<Process> {
     // Start the new process
     let (proc, main_thread) =
-        Process::new_from_path(exe_path).context("Failed to create process")?;
+        Process::new_from_path(exe_path, args, current_dir).context("Failed to create process")?;
+    log!("Process created");
+    let terminate_on_err = TerminateOnDrop(&proc);
 
     // Locate the exe image
     let (exe_base, exe_img) = find_exe(&proc).context("Failed to locate EXE image")?;
@@ -720,12 +830,14 @@ fn start_injected(exe_path: &str, dll_path: &str, func_name: &str) -> Result<()>
         find_ntdll(&proc, exe_img.machine()).context("Failed to locate NTDLL image")?;
 
     // Get the EXE image TLS
+    log!("Locating first TLS callback..");
     let exe_tls =
         read_img_tls(&proc, exe_base, exe_img.as_ref()).context("Failed reading Exe TLS")?;
     let tls_first_cb = read_proc_pointer(&proc, exe_tls.addr_of_callbacks(), exe_img.as_ref())
         .context("Failed reading Exe first TLS callback")?;
     // Relocate the callback
     let tls_first_cb = tls_first_cb - exe_img.imagebase() + exe_base;
+    log!("First TLS CB found");
 
     // Build the inject shellcode
     let injected_code = DynamicCodeSection::new(
@@ -743,6 +855,7 @@ fn start_injected(exe_path: &str, dll_path: &str, func_name: &str) -> Result<()>
     let injected_code_base = proc
         .map_entire_section(&injected_code, Some(exe_base), PAGE_EXECUTE_READWRITE)
         .context("Failed to map section")?;
+    log!("Shellcode mapped into process");
 
     // Patch the TLS first callback to point to our shellcode
     let _ = proc
@@ -762,23 +875,122 @@ fn start_injected(exe_path: &str, dll_path: &str, func_name: &str) -> Result<()>
         exe_img.as_ref(),
     )
     .context("Failed to patch Tls callback entry")?;
+    log!("TLS callback patched, resuming process..");
 
-    // Resume the process and wait for it
+    // Resume the process
     unsafe {
         ResumeThread(main_thread);
     }
-    proc.wait(INFINITE);
 
-    Ok(())
+    mem::forget(terminate_on_err);
+    Ok(proc)
 }
 
-fn hello(mut cx: FunctionContext) -> JsResult<JsString> {
-    let _ = start_injected("", "", "");
-    Ok(cx.string("hello node"))
+/// Just a failsafe to prevent too many threads from being spawned and leaked.
+static INJECT_THREAD_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+struct DecrementInjectThreadCount;
+
+impl Drop for DecrementInjectThreadCount {
+    fn drop(&mut self) {
+        INJECT_THREAD_COUNT.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+fn launch(mut cx: FunctionContext) -> JsResult<JsPromise> {
+    let cx = &mut cx;
+    let channel = cx.channel();
+    let params = cx.argument::<JsObject>(0)?;
+    let mut get_string = |name| {
+        Ok(params.get::<JsString, _, _>(cx, name)?.value(cx))
+    };
+    let path = get_string("appPath")?;
+    let args = get_string("args")?;
+    let current_dir = get_string("currentDir")?;
+    let dll_path = get_string("dllPath")?;
+    let func = get_string("dllFunc")?;
+
+    let log_callback = params.get::<JsFunction, _, _>(cx, "logCallback")?;
+    let log_callback = log_callback.root(cx);
+    let log_callback = LogCallback {
+        channel: channel.clone(),
+        callback: Arc::new(Some(log_callback)),
+    };
+
+    let (deferred, promise) = cx.promise();
+    if INJECT_THREAD_COUNT.load(Ordering::Relaxed) > 10 {
+        // ???? Something is not working, but not sure what we can do.
+        // So just throw an error and don't create more threads as long as the existing
+        // ones are still running. Hopefully they exit at some point.
+        return cx.throw_error("Inject thread limit reached");
+    }
+    std::thread::spawn(move || {
+        LOG_CALLBACK.with(|cb| {
+            *cb.borrow_mut() = Some(log_callback);
+        });
+        INJECT_THREAD_COUNT.fetch_add(1, Ordering::Relaxed);
+        let _decrement_on_func_exit = DecrementInjectThreadCount;
+        let result = std::panic::catch_unwind(|| {
+            start_injected(&path, &args, &current_dir, &dll_path, &func)
+        });
+        let result = match result {
+            Ok(res) => res,
+            Err(panic) => {
+                if let Some(msg) = panic.downcast_ref::<String>() {
+                    Err(anyhow!("Inject thread panicked with message {}", msg))
+                } else if let Some(msg) = panic.downcast_ref::<&'static str>() {
+                    Err(anyhow!("Inject thread panicked with message {}", msg))
+                } else {
+                    Err(anyhow!("Inject thread panicked with unknown panic payload"))
+                }
+            }
+        };
+        let _ = deferred.try_settle_with(&channel, move |mut cx| {
+            match result {
+                Ok(process) => Ok(cx.boxed(Arc::new(process))),
+                Err(e) => {
+                    let msg = format!("{:?}", e);
+                    cx.throw_error(msg)
+                }
+            }
+        });
+    });
+    Ok(promise)
+}
+
+struct SendPtr(HANDLE);
+unsafe impl Send for SendPtr {}
+
+fn wait_for_exit(mut cx: FunctionContext) -> JsResult<JsPromise> {
+    let cx = &mut cx;
+    let process = cx.argument::<JsBox<Arc<Process>>>(0)?;
+    let process = Arc::clone(&process);
+    let channel = cx.channel();
+    let (deferred, promise) = cx.promise();
+    // Spawning a new thread for this is a bit silly, but let's assume there's not
+    // going to be hundred different processes that are being waited on simultaneously.
+    // A better solution would use/integrate with something that uses WaitForMultipleObjects.
+    std::thread::spawn(move || {
+        INJECT_THREAD_COUNT.fetch_add(1, Ordering::Relaxed);
+        let _decrement_on_func_exit = DecrementInjectThreadCount;
+        process.wait(INFINITE);
+        let result = process.exit_code();
+        let _ = deferred.try_settle_with(&channel, move |mut cx| {
+            match result {
+                Ok(exit_code) => Ok(cx.number(exit_code)),
+                Err(e) => {
+                    let msg = format!("{:?}", e);
+                    cx.throw_error(msg)
+                }
+            }
+        });
+    });
+    Ok(promise)
 }
 
 #[neon::main]
 fn main(mut cx: ModuleContext) -> NeonResult<()> {
-    cx.export_function("hello", hello)?;
+    cx.export_function("launch", launch)?;
+    cx.export_function("waitForExit", wait_for_exit)?;
     Ok(())
 }
