@@ -9,7 +9,10 @@ use std::sync::{Arc, Once};
 
 use anyhow::{anyhow, Context as AnyhowContext, Result};
 use memoffset::offset_of;
+use neon::context::Context;
+use neon::prelude::*;
 use ntapi::ntmmapi::{NtCreateSection, NtMapViewOfSection, NtUnmapViewOfSection, ViewUnmap};
+use shellcode::build_injected_code;
 use winapi::shared::minwindef::FALSE;
 use winapi::shared::ntdef::{LARGE_INTEGER, MAXULONG, NT_SUCCESS, OBJECT_ATTRIBUTES};
 use winapi::um::errhandlingapi::GetLastError;
@@ -33,9 +36,6 @@ use winapi::um::winnt::{
     PAGE_EXECUTE_WRITECOPY, PAGE_READWRITE, PVOID, SECTION_MAP_EXECUTE, SECTION_MAP_READ,
     SECTION_MAP_WRITE, SECTION_QUERY, SEC_COMMIT, SEC_IMAGE,
 };
-use neon::context::Context;
-use neon::prelude::*;
-use shellcode::build_injected_code;
 
 mod shellcode;
 
@@ -63,9 +63,7 @@ impl LogCallback {
         let _ = self.channel.try_send(move |mut cx| {
             if let Some(ref cb) = *cb {
                 let cb = cb.to_inner(&mut cx);
-                cb.call_with(&mut cx)
-                    .arg(cx.string(&msg))
-                    .exec(&mut cx)?;
+                cb.call_with(&cx).arg(cx.string(&msg)).exec(&mut cx)?;
             }
             Ok(())
         });
@@ -96,7 +94,6 @@ impl Drop for LogCallback {
         }
     }
 }
-
 
 fn system_info() -> &'static SYSTEM_INFO {
     static INIT: Once = Once::new();
@@ -347,7 +344,11 @@ impl<'a> Drop for TerminateOnDrop<'a> {
     fn drop(&mut self) {
         let ok = unsafe { TerminateProcess(self.0.handle(), 0) };
         if ok == 0 {
-            log!("Failed to terminate process {:p}: {}", self.0, io::Error::last_os_error());
+            log!(
+                "Failed to terminate process {:p}: {}",
+                self.0,
+                io::Error::last_os_error()
+            );
         }
     }
 }
@@ -452,9 +453,11 @@ impl Process {
             );
 
             if success == FALSE {
-                return Err(
-                    anyhow!("Failed to create process {}: {}", path, io::Error::last_os_error())
-                );
+                return Err(anyhow!(
+                    "Failed to create process {}: {}",
+                    path,
+                    io::Error::last_os_error()
+                ));
             }
 
             Ok((
@@ -901,9 +904,7 @@ fn launch(mut cx: FunctionContext) -> JsResult<JsPromise> {
     let cx = &mut cx;
     let channel = cx.channel();
     let params = cx.argument::<JsObject>(0)?;
-    let mut get_string = |name| {
-        Ok(params.get::<JsString, _, _>(cx, name)?.value(cx))
-    };
+    let mut get_string = |name| Ok(params.get::<JsString, _, _>(cx, name)?.value(cx));
     let path = get_string("appPath")?;
     let args = get_string("args")?;
     let current_dir = get_string("currentDir")?;
@@ -945,13 +946,11 @@ fn launch(mut cx: FunctionContext) -> JsResult<JsPromise> {
                 }
             }
         };
-        let _ = deferred.try_settle_with(&channel, move |mut cx| {
-            match result {
-                Ok(process) => Ok(cx.boxed(Arc::new(process))),
-                Err(e) => {
-                    let msg = format!("{:?}", e);
-                    cx.throw_error(msg)
-                }
+        let _ = deferred.try_settle_with(&channel, move |mut cx| match result {
+            Ok(process) => Ok(cx.boxed(Arc::new(process))),
+            Err(e) => {
+                let msg = format!("{:?}", e);
+                cx.throw_error(msg)
             }
         });
     });
@@ -975,13 +974,11 @@ fn wait_for_exit(mut cx: FunctionContext) -> JsResult<JsPromise> {
         let _decrement_on_func_exit = DecrementInjectThreadCount;
         process.wait(INFINITE);
         let result = process.exit_code();
-        let _ = deferred.try_settle_with(&channel, move |mut cx| {
-            match result {
-                Ok(exit_code) => Ok(cx.number(exit_code)),
-                Err(e) => {
-                    let msg = format!("{:?}", e);
-                    cx.throw_error(msg)
-                }
+        let _ = deferred.try_settle_with(&channel, move |mut cx| match result {
+            Ok(exit_code) => Ok(cx.number(exit_code)),
+            Err(e) => {
+                let msg = format!("{:?}", e);
+                cx.throw_error(msg)
             }
         });
     });
