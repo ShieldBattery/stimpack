@@ -16,6 +16,7 @@ jobs:
         uses: actions/setup-node@v2
         with:
           node-version: "16.x"
+          registry-url: "https://registry.npmjs.org"
 
       - uses: actions-rs/toolchain@v1
         with:
@@ -58,7 +59,7 @@ jobs:
           NEW_VERSION: ${{ github.event.inputs.release-version }}
 
       - name: Publish
-        run: yarn publish --verbose --access public --tag ${{ env.RELEASE_TAG }}
+        run: yarn publish --verbose
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPMJS_ACCESS_TOKEN }}
 
