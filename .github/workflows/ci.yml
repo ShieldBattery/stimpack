@@ -14,6 +14,7 @@ jobs:
           toolchain: stable
           override: true
       - uses: actions-rs/cargo@v1
+        working-directory: ./native
         with:
           command: check
 
@@ -28,6 +29,7 @@ jobs:
           toolchain: stable
           override: true
       - uses: actions-rs/cargo@v1
+        working-directory: ./native
         with:
           command: test
 
@@ -43,6 +45,7 @@ jobs:
           override: true
       - run: rustup component add rustfmt
       - uses: actions-rs/cargo@v1
+        working-directory: ./native
         with:
           command: fmt
           args: --all -- --check
@@ -59,6 +62,7 @@ jobs:
           override: true
       - run: rustup component add clippy
       - uses: actions-rs/cargo@v1
+        working-directory: ./native
         with:
           command: clippy
           args: -- -D warnings
