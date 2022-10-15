@@ -47,6 +47,18 @@ jobs:
         env:
           RELEASE_TYPE: ${{ github.event.inputs.release-type }}
 
+      - name: Compile .node
+        run: yarn run build-release
+
+      - name: Tag .node as prebuild
+        run: yarn run tag-prebuild
+
+      - name: Upload prebuild artifacts
+        uses: actions/upload-artifact@v2
+        with:
+          name: prebuilds
+          path: prebuilds/
+
       - name: Commit changed files and create tag
         run: |
           git add "package.json"
