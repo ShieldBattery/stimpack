@@ -2,8 +2,8 @@ name: Release package
 on:
   workflow_dispatch:
     inputs:
-      release-type:
-        description: "Release type (one of): patch, minor, major, prepatch, preminor, premajor, prerelease"
+      release-version:
+        description: "New version number (e.g. 1.0.0)"
         required: true
 jobs:
   release:
@@ -31,21 +31,11 @@ jobs:
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git config --global user.name "GitHub Actions"
 
-      - name: Bump release version
-        if: startsWith(github.event.inputs.release-type, 'pre') != true
+      - name: Set version
         run: |
-          echo "NEW_VERSION=$(npm --no-git-tag-version version $RELEASE_TYPE)" >> $GITHUB_ENV
-          echo "RELEASE_TAG=latest" >> $GITHUB_ENV
+          npm --no-git-tag-version version ${{ env.NEW_VERSION }}
         env:
-          RELEASE_TYPE: ${{ github.event.inputs.release-type }}
-
-      - name: Bump pre-release version
-        if: startsWith(github.event.inputs.release-type, 'pre')
-        run: |
-          echo "NEW_VERSION=$(npm --no-git-tag-version --preid=beta version $RELEASE_TYPE
-          echo "RELEASE_TAG=beta" >> $GITHUB_ENV
-        env:
-          RELEASE_TYPE: ${{ github.event.inputs.release-type }}
+          NEW_VERSION: ${{ github.event.inputs.release-version }}
 
       - name: Compile .node
         run: yarn run build-release
@@ -64,6 +54,8 @@ jobs:
           git add "package.json"
           git commit -m "Version ${{ env.NEW_VERSION }}"
           git tag ${{ env.NEW_VERSION }}
+        env:
+          NEW_VERSION: ${{ github.event.inputs.release-version }}
 
       - name: Publish
         run: yarn publish --verbose --access public --tag ${{ env.RELEASE_TAG }}
