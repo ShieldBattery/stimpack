@@ -9,7 +9,7 @@
     "build-release": "npm run build -- --release",
     "install": "neon-load-or-build",
     "tag-prebuild": "neon-tag-prebuild",
-    "test": "cargo test"
+    "test": "cd native && cargo test"
   },
   "author": "Travis Collins <travis@tec27.com> (http://tec27.com/)",
   "license": "MIT",
