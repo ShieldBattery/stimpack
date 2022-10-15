@@ -59,7 +59,7 @@ jobs:
           NEW_VERSION: ${{ github.event.inputs.release-version }}
 
       - name: Publish
-        run: yarn publish --verbose
+        run: yarn publish --access public --verbose
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPMJS_ACCESS_TOKEN }}
 
