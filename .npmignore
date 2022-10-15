@@ -1,5 +1,6 @@
-target
+native/target
+native/index.node
 **/*~
 .github
 .vscode
-.idea/
+.idea

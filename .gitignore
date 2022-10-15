@@ -1,5 +1,7 @@
-target
+native/target
+native/index.node
+prebuilds/
 **/node_modules
 **/.DS_Store
-.idea/
+.idea
 npm-debug.log*
