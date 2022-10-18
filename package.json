@@ -7,15 +7,12 @@
     "build": "cd native && cargo-cp-artifact -nc index.node -- cargo build --target=x86_64-pc-windows-msvc --message-format=json-render-diagnostics",
     "build-debug": "npm run build --",
     "build-release": "npm run build -- --release",
-    "install": "neon-load-or-build",
-    "tag-prebuild": "neon-tag-prebuild",
+    "tag-prebuild": "node ./tag-prebuild.js",
     "test": "cd native && cargo test"
   },
   "author": "Travis Collins <travis@tec27.com> (http://tec27.com/)",
   "license": "MIT",
-  "dependencies": {
-    "neon-load-or-build": "^2.2.2"
-  },
+  "dependencies": {},
   "repository": {
     "type": "git",
     "url": "git+https://github.com/ShieldBattery/stimpack.git"

@@ -12,11 +12,6 @@ mkdirp@^1.0.4:
   resolved "https://registry.yarnpkg.com/mkdirp/-/mkdirp-1.0.4.tgz#3eb5ed62622756d79a5f0e2a221dfebad75c2f7e"
   integrity sha512-vVqVZQyf3WLx2Shd0qJ9xuvqgAyKPLAiqITEtqW0oIUjzo3PePDd6fW9iFz30ef7Ysp/oiWqbhszeGWW2T6Gzw==
 
-neon-load-or-build@^2.2.2:
-  version "2.2.2"
-  resolved "https://registry.yarnpkg.com/neon-load-or-build/-/neon-load-or-build-2.2.2.tgz#f5299f24a71b6f3e4e879f302a9c3fc3e4c1daa4"
-  integrity sha512-Muq74QiBaQO/Pi64XcqLjCh8vRriEo9rMvz/WvF+CFXTY0AgbD0vE14q4rmYsoJY+djav95JetHXyzaP+giaZg==
-
 neon-tag-prebuild@^1.1.1:
   version "1.1.1"
   resolved "https://registry.yarnpkg.com/neon-tag-prebuild/-/neon-tag-prebuild-1.1.1.tgz#b5a01eac61a8e06df96a01425bcb5c15289e6749"
