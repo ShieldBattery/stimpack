@@ -1,6 +1,6 @@
 {
   "name": "@shieldbattery/stimpack",
-  "version": "0.3.0",
+  "version": "1.0.0",
   "description": "Rust-based Node.js native module for launching processes and injecting DLLs into them",
   "main": "index.js",
   "scripts": {
