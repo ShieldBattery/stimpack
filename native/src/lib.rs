@@ -14,7 +14,6 @@ use ntapi::ntmmapi::{NtCreateSection, NtMapViewOfSection, NtUnmapViewOfSection, 
 use shellcode::build_injected_code;
 use winapi::shared::minwindef::FALSE;
 use winapi::shared::ntdef::{LARGE_INTEGER, MAXULONG, NT_SUCCESS, OBJECT_ATTRIBUTES};
-use winapi::um::errhandlingapi::GetLastError;
 use winapi::um::handleapi::CloseHandle;
 use winapi::um::memoryapi::{
     ReadProcessMemory, VirtualProtectEx, VirtualQueryEx, WriteProcessMemory,
@@ -236,10 +235,9 @@ pub struct DynamicCodeSection {
 }
 
 impl DynamicCodeSection {
-    pub fn new(data: &[u8]) -> Option<Self> {
+    pub fn new(data: &[u8]) -> Result<Self> {
         if data.len() > MAXULONG as usize {
-            log!("Unsupported section size {}", data.len());
-            return None;
+            return Err(anyhow!("Unsupported section size {}", data.len()));
         }
 
         let mut sect = Self {
@@ -268,8 +266,7 @@ impl DynamicCodeSection {
                 ptr::null_mut(),
             );
             if !NT_SUCCESS(status) {
-                log!("Failed creating DynamicCodeSection");
-                return None;
+                return Err(anyhow!("Failed creating DynamicCodeSection {status:08x}"));
             }
 
             // Map it with write permissions so we can write to it
@@ -289,13 +286,11 @@ impl DynamicCodeSection {
                 PAGE_READWRITE,
             );
             if !NT_SUCCESS(status) {
-                log!("Failed to map DynamicCodeSection");
-                return None;
+                return Err(anyhow!("Failed to map DynamicCodeSection {status:08x}"));
             }
 
             if view_size < data.len() {
-                log!("Section is too small");
-                return None;
+                return Err(anyhow!("Section is too small"));
             }
 
             // Copy the input buffer
@@ -307,7 +302,7 @@ impl DynamicCodeSection {
             NtUnmapViewOfSection(GetCurrentProcess(), map_base);
         }
 
-        Some(sect)
+        Ok(sect)
     }
 
     pub fn handle(&self) -> HANDLE {
@@ -408,7 +403,11 @@ impl<'a> Iterator for MemRegionIter<'a> {
     type Item = MEMORY_BASIC_INFORMATION;
     fn next(&mut self) -> Option<Self::Item> {
         if self.curr_address < self.end_address {
-            let mbi = self.proc.virtual_query(self.curr_address)?;
+            let mbi = self
+                .proc
+                .virtual_query(self.curr_address)
+                .inspect_err(|e| log!("Virtual query {:x} failed {e:#}", self.curr_address))
+                .ok()?;
             self.curr_address = mbi.end_addr();
             return Some(mbi);
         }
@@ -490,20 +489,20 @@ impl Process {
         }
     }
 
-    pub fn virtual_query(&self, addr: usize) -> Option<MEMORY_BASIC_INFORMATION> {
+    pub fn virtual_query(&self, addr: usize) -> Result<MEMORY_BASIC_INFORMATION> {
         unsafe {
             let mut mbi: MEMORY_BASIC_INFORMATION = std::mem::zeroed();
             let bytes = VirtualQueryEx(self.h, addr as PVOID, &mut mbi, mem::size_of_val(&mbi));
 
             if bytes == 0 {
-                return None;
+                return Err(io::Error::last_os_error().into());
             }
 
-            Some(mbi)
+            Ok(mbi)
         }
     }
 
-    pub fn read(&self, addr: usize, length: usize) -> Option<Vec<u8>> {
+    pub fn read(&self, addr: usize, length: usize) -> Result<Vec<u8>> {
         let mut buffer: Vec<u8> = vec![0u8; length];
 
         unsafe {
@@ -515,20 +514,16 @@ impl Process {
                 ptr::null_mut(),
             ) == FALSE
             {
-                log!(
-                    "ReadProcessMemory({:x?} Len:{:x?}) failed GLE:{}",
-                    addr,
-                    length,
-                    GetLastError()
-                );
-                return None;
+                return Err(anyhow::Error::from(io::Error::last_os_error())).with_context(|| {
+                    format!("ReadProcessMemory({:x} Len:{:x}) failed", addr, length,)
+                });
             }
         }
 
-        Some(buffer)
+        Ok(buffer)
     }
 
-    pub fn read_struct<T: Sized>(&self, addr: usize, obj: *mut T) -> Option<()> {
+    pub fn read_struct<T: Sized>(&self, addr: usize, obj: *mut T) -> Result<()> {
         unsafe {
             if ReadProcessMemory(
                 self.h,
@@ -538,45 +533,52 @@ impl Process {
                 ptr::null_mut(),
             ) == FALSE
             {
-                log!(
-                    "ReadProcessMemory({:x?} Len:{:x?}) failed GLE:{}",
-                    addr,
-                    mem::size_of::<T>(),
-                    GetLastError()
-                );
-                return None;
+                return Err(anyhow::Error::from(io::Error::last_os_error())).with_context(|| {
+                    format!(
+                        "ReadProcessMemory({:x} Len:{:x}) failed",
+                        addr,
+                        mem::size_of::<T>(),
+                    )
+                });
             }
         }
 
-        Some(())
+        Ok(())
     }
 
-    pub fn write(&self, addr: usize, data: &[u8]) -> Option<usize> {
+    pub fn write(&self, addr: usize, data: &[u8]) -> Result<usize> {
         unsafe {
             let mut written = 0usize;
-            if WriteProcessMemory(
+            let result = WriteProcessMemory(
                 self.h,
                 addr as PVOID,
                 data.as_ptr() as PVOID,
                 data.len(),
                 &mut written,
-            ) == FALSE
-            {
-                return None;
+            );
+            if result == FALSE {
+                return Err(anyhow::Error::from(io::Error::last_os_error())).with_context(|| {
+                    format!("WriteProcessMemory({:x} Len:{:x}) failed", addr, data.len(),)
+                });
             }
 
-            Some(written)
+            Ok(written)
         }
     }
 
-    pub fn protect(&self, addr: usize, length: usize, prot: u32) -> Option<u32> {
+    pub fn protect(&self, addr: usize, length: usize, prot: u32) -> Result<u32> {
         unsafe {
             let mut old_prot = 0u32;
             if VirtualProtectEx(self.h, addr as PVOID, length, prot, &mut old_prot) == FALSE {
-                return None;
+                return Err(anyhow::Error::from(io::Error::last_os_error())).with_context(|| {
+                    format!(
+                        "VirtualProtect({:x} Len:{:x} Prot:{:x}) failed",
+                        addr, length, prot
+                    )
+                });
             }
 
-            Some(old_prot)
+            Ok(old_prot)
         }
     }
 
@@ -629,6 +631,7 @@ impl Process {
                     prot,
                 );
                 if !NT_SUCCESS(status) {
+                    log!("NtMapViewOfSection failed {status:08x}");
                     return None;
                 }
             }
@@ -645,51 +648,57 @@ impl Process {
         MemRegionIter::new(self).filter(|m| m.is_free())
     }
 
-    fn read_image_header<T: MemRegion>(&self, region: &T) -> Option<Box<dyn PeImage>> {
+    fn read_image_header<T: MemRegion>(&self, region: &T) -> Result<Option<Box<dyn PeImage>>> {
         // Read the DOS header
         let mut dos_hdr: IMAGE_DOS_HEADER = unsafe { mem::zeroed() };
-        self.read_struct(region.addr(), ptr::addr_of_mut!(dos_hdr))?;
+        if let Err(_) = self.read_struct(region.addr(), ptr::addr_of_mut!(dos_hdr)) {
+            return Ok(None);
+        }
         if dos_hdr.e_magic != IMAGE_DOS_SIGNATURE {
-            return None;
+            // Something unrelated? Having few of such image regions seems to be expected.
+            return Ok(None);
         }
 
         // Read the FileHeader header
         let nt_header_addr = region.addr() + dos_hdr.e_lfanew as usize;
         let file_header_addr = nt_header_addr + offset_of!(IMAGE_NT_HEADERS, FileHeader);
         let mut file_header: IMAGE_FILE_HEADER = unsafe { mem::zeroed() };
-        self.read_struct(file_header_addr, ptr::addr_of_mut!(file_header))?;
+        self.read_struct(file_header_addr, ptr::addr_of_mut!(file_header))
+            .context("Reading image header")?;
 
         // Get the appropriate NT header structure
-        let nt_header_data = self.read(
-            nt_header_addr,
-            match file_header.Machine {
-                IMAGE_FILE_MACHINE_AMD64 => mem::size_of::<IMAGE_NT_HEADERS64>(),
-                IMAGE_FILE_MACHINE_I386 => mem::size_of::<IMAGE_NT_HEADERS32>(),
-                _ => return None,
-            },
-        )?;
+        let nt_header_data = self
+            .read(
+                nt_header_addr,
+                match file_header.Machine {
+                    IMAGE_FILE_MACHINE_AMD64 => mem::size_of::<IMAGE_NT_HEADERS64>(),
+                    IMAGE_FILE_MACHINE_I386 => mem::size_of::<IMAGE_NT_HEADERS32>(),
+                    x => return Err(anyhow!("Invalid image header machine {x:x}")),
+                },
+            )
+            .context("Reading NT header")?;
 
         let nt_header: Box<dyn PeImage> = match file_header.Machine {
             IMAGE_FILE_MACHINE_AMD64 => unsafe {
                 Box::new(mem::transmute_copy::<
                     [u8; mem::size_of::<IMAGE_NT_HEADERS64>()],
                     IMAGE_NT_HEADERS64,
-                >(&nt_header_data[..].try_into().ok()?))
+                >(&nt_header_data[..].try_into()?))
             },
             IMAGE_FILE_MACHINE_I386 => unsafe {
                 Box::new(mem::transmute_copy::<
                     [u8; mem::size_of::<IMAGE_NT_HEADERS32>()],
                     IMAGE_NT_HEADERS32,
-                >(&nt_header_data[..].try_into().ok()?))
+                >(&nt_header_data[..].try_into()?))
             },
-            _ => return None,
+            x => return Err(anyhow!("Invalid image header machine {x:x}")),
         };
 
         if !nt_header.valid_signature() {
-            return None;
+            return Err(anyhow!("NT header has invalid signature"));
         }
 
-        Some(nt_header)
+        Ok(Some(nt_header))
     }
 
     pub fn iter_images<'a>(
@@ -700,7 +709,13 @@ impl Process {
                 return None;
             }
 
-            self.read_image_header(&m).map(|img| (m, img))
+            match self.read_image_header(&m) {
+                Ok(o) => o.map(|img| (m, img)),
+                Err(e) => {
+                    log!("Failed to read image header @ {:x} {e:#}", m.addr());
+                    None
+                }
+            }
         })
     }
 }
@@ -735,11 +750,12 @@ fn find_ntdll(proc: &Process, machine: u16) -> Option<usize> {
         proc.read_struct(
             m.addr() + exp_dd.VirtualAddress as usize,
             ptr::addr_of_mut!(exp_dir),
-        )?;
+        )
+        .ok()?;
 
         let exp_name_addr = m.addr() + exp_dir.Name as usize;
         match proc.read(exp_name_addr, "ntdll.dll\0".len()) {
-            Some(name) if name.eq_ignore_ascii_case(b"ntdll.dll\0") => Some(m.addr()),
+            Ok(name) if name.eq_ignore_ascii_case(b"ntdll.dll\0") => Some(m.addr()),
             _ => None,
         }
     })
@@ -758,43 +774,37 @@ fn read_img_tls<T: PeImage + ?Sized>(
     proc: &Process,
     img_base: usize,
     img: &T,
-) -> Option<Box<dyn PeTLS>> {
-    let tls_dd = img.tls_dd()?;
+) -> Result<Box<dyn PeTLS>> {
+    let tls_dd = img.tls_dd().context("No TLS data directory")?;
     let tls_data = proc.read(
         img_base + tls_dd.VirtualAddress as usize,
         tls_dd.Size as usize,
     )?;
     match img.is64bit() {
         true => unsafe {
-            Some(Box::new(mem::transmute_copy::<
+            Ok(Box::new(mem::transmute_copy::<
                 [u8; mem::size_of::<IMAGE_TLS_DIRECTORY64>()],
                 IMAGE_TLS_DIRECTORY64,
-            >(&tls_data[..].try_into().ok()?)))
+            >(&tls_data[..].try_into()?)))
         },
         false => unsafe {
-            Some(Box::new(mem::transmute_copy::<
+            Ok(Box::new(mem::transmute_copy::<
                 [u8; mem::size_of::<IMAGE_TLS_DIRECTORY32>()],
                 IMAGE_TLS_DIRECTORY32,
-            >(&tls_data[..].try_into().ok()?)))
+            >(&tls_data[..].try_into()?)))
         },
     }
 }
 
-fn read_proc_pointer<T: PeImage + ?Sized>(proc: &Process, addr: usize, img: &T) -> Option<usize> {
+fn read_proc_pointer<T: PeImage + ?Sized>(proc: &Process, addr: usize, img: &T) -> Result<usize> {
     match img.is64bit() {
         true => {
             let data = proc.read(addr, mem::size_of::<u64>())?;
-            if data.len() != mem::size_of::<u64>() {
-                return None;
-            }
-            Some(u64::from_le_bytes(data.try_into().unwrap()) as usize)
+            Ok(u64::from_le_bytes(data.try_into().unwrap()) as usize)
         }
         false => {
             let data = proc.read(addr, mem::size_of::<u32>())?;
-            if data.len() != mem::size_of::<u32>() {
-                return None;
-            }
-            Some(u32::from_le_bytes(data.try_into().unwrap()) as usize)
+            Ok(u32::from_le_bytes(data.try_into().unwrap()) as usize)
         }
     }
 }
@@ -804,7 +814,7 @@ fn write_proc_pointer<T: PeImage + ?Sized>(
     addr: usize,
     value: usize,
     img: &T,
-) -> Option<usize> {
+) -> Result<usize> {
     match img.is64bit() {
         true => proc.write(addr, &(value as u64).to_le_bytes()),
         false => proc.write(addr, &(value as u32).to_le_bytes()),
@@ -832,14 +842,14 @@ fn start_injected(
         find_ntdll(&proc, exe_img.machine()).context("Failed to locate NTDLL image")?;
 
     // Get the EXE image TLS
-    log!("Locating first TLS callback..");
+    log!("Locating first TLS callback, exe base {exe_base:x}, ntdll base {ntdll_base:x}");
     let exe_tls =
         read_img_tls(&proc, exe_base, exe_img.as_ref()).context("Failed reading Exe TLS")?;
     let tls_first_cb = read_proc_pointer(&proc, exe_tls.addr_of_callbacks(), exe_img.as_ref())
         .context("Failed reading Exe first TLS callback")?;
     // Relocate the callback
     let tls_first_cb = tls_first_cb - exe_img.imagebase() + exe_base;
-    log!("First TLS CB found");
+    log!("First TLS CB found: {tls_first_cb:x}");
 
     // Build the inject shellcode
     let injected_code = DynamicCodeSection::new(
@@ -857,26 +867,28 @@ fn start_injected(
     let injected_code_base = proc
         .map_entire_section(&injected_code, Some(exe_base), PAGE_EXECUTE_READWRITE)
         .context("Failed to map section")?;
-    log!("Shellcode mapped into process");
+    log!("Shellcode mapped into process at {injected_code_base:x}");
 
     // Patch the TLS first callback to point to our shellcode
+    let addr_of_callbacks = exe_tls.addr_of_callbacks();
+    log!("Writing new TLS callback to {addr_of_callbacks:x}");
     let _ = proc
         .protect(
-            exe_tls.addr_of_callbacks(),
+            addr_of_callbacks,
             match exe_img.is64bit() {
                 true => mem::size_of::<u64>(),
                 false => mem::size_of::<u32>(),
             },
             PAGE_EXECUTE_WRITECOPY,
         )
-        .context("Failed to protect Tls Callback Array")?;
+        .context("Failed to protect TLS Callback Array")?;
     let _ = write_proc_pointer(
         &proc,
         exe_tls.addr_of_callbacks(),
         injected_code_base,
         exe_img.as_ref(),
     )
-    .context("Failed to patch Tls callback entry")?;
+    .context("Failed to patch TLS callback entry")?;
     log!("TLS callback patched, resuming process..");
 
     // Resume the process
