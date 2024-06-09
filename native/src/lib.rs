@@ -48,7 +48,7 @@ macro_rules! log {
     }};
 }
 
-thread_local!(static LOG_CALLBACK: RefCell<Option<LogCallback>> = RefCell::new(None));
+thread_local!(static LOG_CALLBACK: RefCell<Option<LogCallback>> = const { RefCell::new(None) });
 
 struct LogCallback {
     channel: Channel,
@@ -200,7 +200,7 @@ impl PeImage for IMAGE_NT_HEADERS32 {
         self.Signature == IMAGE_NT_SIGNATURE
     }
     fn machine(&self) -> u16 {
-        self.FileHeader.Machine as u16
+        self.FileHeader.Machine
     }
 }
 
@@ -224,7 +224,7 @@ impl PeImage for IMAGE_NT_HEADERS64 {
         self.Signature == IMAGE_NT_SIGNATURE
     }
     fn machine(&self) -> u16 {
-        self.FileHeader.Machine as u16
+        self.FileHeader.Machine
     }
 }
 
@@ -314,7 +314,7 @@ impl DynamicCodeSection {
     }
 
     pub fn view_size(&self) -> usize {
-        self.data_size
+        self.view_size
     }
 }
 
@@ -651,7 +651,10 @@ impl Process {
     fn read_image_header<T: MemRegion>(&self, region: &T) -> Result<Option<Box<dyn PeImage>>> {
         // Read the DOS header
         let mut dos_hdr: IMAGE_DOS_HEADER = unsafe { mem::zeroed() };
-        if let Err(_) = self.read_struct(region.addr(), ptr::addr_of_mut!(dos_hdr)) {
+        if self
+            .read_struct(region.addr(), ptr::addr_of_mut!(dos_hdr))
+            .is_err()
+        {
             return Ok(None);
         }
         if dos_hdr.e_magic != IMAGE_DOS_SIGNATURE {
