@@ -1,14 +1,13 @@
 use std::cell::RefCell;
 use std::ffi::OsStr;
 use std::io;
-use std::mem;
+use std::mem::{self, offset_of};
 use std::os::windows::ffi::OsStrExt;
 use std::ptr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Once};
 
 use anyhow::{anyhow, Context as AnyhowContext, Result};
-use memoffset::offset_of;
 use neon::context::Context;
 use neon::prelude::*;
 use ntapi::ntmmapi::{NtCreateSection, NtMapViewOfSection, NtUnmapViewOfSection, ViewUnmap};
@@ -956,9 +955,6 @@ fn launch(mut cx: FunctionContext) -> JsResult<JsPromise> {
     });
     Ok(promise)
 }
-
-struct SendPtr(HANDLE);
-unsafe impl Send for SendPtr {}
 
 fn wait_for_exit(mut cx: FunctionContext) -> JsResult<JsPromise> {
     let cx = &mut cx;
