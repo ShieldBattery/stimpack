@@ -1,12 +1,13 @@
 {
   "name": "@shieldbattery/stimpack",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Rust-based Node.js native module for launching processes and injecting DLLs into them",
   "main": "index.js",
   "scripts": {
     "build": "cd native && cargo-cp-artifact -nc index.node -- cargo build --target=x86_64-pc-windows-msvc --message-format=json-render-diagnostics",
     "build-debug": "npm run build --",
     "build-release": "npm run build -- --release",
+    "sign-binary": "sign-binary.bat",
     "tag-prebuild": "node ./tag-prebuild.js",
     "test": "cd native && cargo test"
   },
